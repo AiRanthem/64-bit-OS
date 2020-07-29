@@ -18,6 +18,6 @@
 ## diary
 
 + 2020/7/26 看完第一部分
-+ 2020/7/27 用Boot程序完成Hello World
-+ 2020/7/28 完成Boot程序在FAT12文件系统的RootDir中查找Boot程序
-
++ 2020/7/27 完成Boot的开始部分
++ 2020/7/28 完成Boot程序查找Loader部分
++ 2020/7/29 完成Boot全部，开始Loader

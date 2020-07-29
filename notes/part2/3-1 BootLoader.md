@@ -1,7 +1,7 @@
-# BootLoader
+# 基础知识
 本章主要复习汇编语言。以下内容整理自网络与我的汇编语言课程笔记
 
-[boot.asm](../../source/3-1/boot.asm)
+[boot.asm](../../source/BootLoader/boot.asm)
 
 Boot程序运行时，BIOS会初始化寄存器：CS=0x0000, IP=0x7c00
 
@@ -28,6 +28,8 @@ StartBootMessage:   db  "Hello World"
 BS_VolLab	        db	'boot loader'
 ```
 其区别在于，带冒号的使用时编译器只知道位置，不带冒号的使用时编译器同时知道类型（后面的db）
+
+所有标号后接 db / dw / dd / dq 只能出现在数据段中。
 
 ## 寄存器
 >部分摘抄自 [这篇博客](https://blog.csdn.net/u014287775/article/details/76572496)
@@ -100,6 +102,14 @@ div 内存单元
 
 dx和ax分别存放100001的高16位和低16位值，所以将100001表示为16进制的形式：186a1h.
 
+### MUL
+|被乘数|	乘数	        |乘积
+|---|---|---|
+|AL	    |reg/mem8	|AX
+|AX	    |reg/mem16	|DX:AX
+|EAX	|reg/mem32	|EDX:EAX
+
+MUL不能乘立即数。
 ### CMP
 CMP a, b
 
@@ -133,6 +143,27 @@ boot程序在引导扇区
 
 各种扇区的相关计算在 **P45**
 
+FAT以`簇`为单位来管理空间，在引导扇区内指明一个簇占用多少个扇区（软盘的话一个簇只能是一个扇区）。
+每个簇必须归属于一个文件，也就是说即使一个文件只有1B，也要完整分配一个簇。如果文件占用多个簇，则通过FAT表分配
+
+FAT12的FAT表，一个表项3为16进制，12位二进制，占用1.5字节
+
+**注意：由于FAT表从`FAT[2]`开始才有效，所以读到的所有簇号使用时需要`-2`才能对应到数据区的簇**
+
+>解释：FAT表中最小的簇号是2，而软盘数据区中，第一个簇，其簇号就是0，在对应时
+>表中簇号2就对应数据区簇号0
+
+FAT表起链接各个簇的作用：目录扇区中保存文件的起始簇，该簇对应的簇号的FAT表项值就是下一个簇的簇号，0为空FFF为坏。
+
+读取表项方法：
+1. 表项号 × 3 / 2
+2. 奇偶保存在Odd变量中（奇1偶0）
+3. 第一步计算结果除以BPB_BytesPerSec，商值是FAT表项所在扇区在FAT1中的偏移，余数是表项首地址在扇区中的偏移
+4. 以上一步的两个偏移找到对应表项所在字节的地址，如果前面Odd是1，则右移四位
+5. 最后把除了最后三位有效位的其他位置零即可。
+
+# 实践操作
+
 ## 使用nasm编译汇编代码
 ```shell script
 nasm <asm file> -o <object file>
@@ -140,9 +171,24 @@ nasm boot.asm -o boot.bin
 ```
 
 ## 在bochs中运行Boot程序
+以下脚本可以一键格式化镜像文件并拷入Loader。直接`sudo`执行[这个脚本](../../bochs/format_boot_loader.sh)即可
 ```shell script
-# 将编译好的boot程序写入软盘镜像
-dd if=boot.bin of=../../resources/boot.img bs=512 count=1 conv=notrunc
+# 将编译好的boot程序写入软盘镜像。这个过程其实就是格式化软盘为FAT12
+dd if=boot.bin of=boot.img bs=512 count=1 conv=notrunc
+# 挂载镜像到宿主机文件系统
+sudo mount boot.img /media -t vfat -o loop
+# 将loader文件拷贝到软盘中。我们的文件系统会自动设置软盘的FAT12目录、分配簇
+sudo cp loader.bin /media
+sync
+sudo umount /media
 # 启动bochs虚拟机
-bochs -f resources/bochsrc
+bochs -f resources/bochsrc # 如果bochsrc在当前目录或者user目录就不需要加-f
 ```
+
+## 踩的坑以及一些教训
+因为Boot loader程序没有具体的分段，就是全部都是代码，所以需要把数据段的内容（db）写在最下面。
+
+之前我把Loader的StartLoaderMessage写在了前面，没有加跳转，从Boot过来的时候就直接从
+"Start Loader"的字符串开始运行所以出错了。
+
+如果非要把数据写在前面，要和Boot一样第一行加跳转

@@ -83,7 +83,7 @@ Label_Search_In_Root_Dir_Begin:                         ; 循环读取扇区找L
     dec     word    [RootDirSizeForLoop]    ; 循环计数 - 1
     ; 读一个扇区
     mov     ax,     00h
-    mov     ex,     ax
+    mov     es,     ax
     mov     bx,     8000h                   ; 设置参数ES:BX为 0:8000h 因为现在是BootLoader阶段，所以内存随便用
     mov     ax,     [SectorNo]              ; 设置参数AX为当前要读取的扇区号
     mov     cl,     1                       ; 设置参数CL位读取1个扇区
@@ -129,9 +129,67 @@ Label_Goto_Next_Sector_In_Root_Dir:
     add     word    [SectorNo], 1
     jmp     Label_Search_In_Root_Dir_Begin
 
+Label_No_LoaderBin:
+    mov     ax,     1301h
+    mov     bx,     008ch
+    mov     dx,     0100h
+    mov     cx,     21
+    push    ax
+    mov     ax,     ds
+    mov     es,     ax
+    pop     ax
+    mov     bp,     NoLoaderMessage
+    int     10h
+    jmp     $
 
-Label_No_LoaderBin: ; todo
-Label_Filename_Found: ; todo
+Label_Filename_Found:
+    mov     ax,     RootDirSectors
+    and     di,     0ffe0h          ; ES:DI指向Loader程序对应的目录项，这里复位到目录开始
+    add     di,     01ah            ; 移动到起始簇号，由此现在的[ES:DI]保存了Loader程序在软盘上的第一个簇号
+    mov     cx,     word    [es:di]
+    push    cx                      ; 借由CX保存Loader程序的簇
+    ; 由簇号计算出扇区号 = 簇号 * 扇区每簇(软盘是1) + (保留扇区数 + FAT表扇区数) + 目录扇区数 - 2（参见P42文件系统分配图）
+    ; = 簇号 + 目录扇区起始扇区号 + 目录扇区数 - 2
+    ; 这里用的是作者的取巧方法：SectorBalance = 目录起始扇区号 - 2
+    ; 也就是说 扇区号 = 簇号 + RootDirSectors + SectorBalance
+    add     cx,     ax              ; 簇号 + 目录扇区数
+    add     cx,     SectorBalance   ; CX = 簇号 + 目录扇区数 + 目录扇区起始扇区号 - 2 = 数据区实际扇区号
+    ; 找到了Loader文件位置，现在定义读取Loader文件的目标内存位置 [ES:BX]
+    mov     ax,     BaseOfLoader
+    mov     es,     ax
+    mov     bx,     OffsetOfLoader
+    mov     ax,     cx              ; AX存Loader物理扇区号，这样在设置cl = 1就可以call读取扇区函数了
+Label_Go_On_Loading_File:
+    ; display a '.' on screen when per sector read
+    push    ax
+    push    bx
+    mov     ah,     0eh
+    mov     al,     '.'
+    mov     bl,     0fh
+    int     10h
+    pop     bx
+    pop     ax
+    ; read a sector of Loader
+    mov     cl,     1
+    call    Func_ReadOneSector
+    ; 更新簇号
+    pop     ax                  ; FAT表中的簇号出栈
+    call    Func_GetFATEntry    ; AX = next cluster
+    cmp     ax,     0fffh       ; fff = fin
+    jz      Label_File_Loaded
+    ; 计算并读取下一个扇区，保存在AX，簇号压栈
+    push    ax
+    mov     dx,     RootDirSectors
+    add     ax,     dx
+    add     ax,     SectorBalance
+    ; 调整缓冲区指针
+    add     bx,     [BPB_BytesPerSec]   ; 往[ES:BX]读取了一个扇区，指针偏移一个扇区的字节量
+    jmp     Label_Go_On_Loading_File
+Label_File_Loaded:
+    ; 至此已经将Loader加载到了 BaseOfLoader:OffsetOfLoader 了
+    jmp     BaseOfLoader:OffsetOfLoader
+
+;====== Functions
 ;====== read one sector from floppy
 ; :param AX: 待读取的磁盘起始扇区号
 ; :param CL: 读入扇区数
@@ -161,12 +219,58 @@ Label_Go_On_Reading:
 	pop	    bp                      ; 恢复原来的栈
 	ret
 
-;====== temp variables
-RootDirSizeForLoop: dw  RootDirSectors
-SectorNo:           dw  0
-LoaderFileName      db  "LOADER BIN", 0 ; loader.bin在fat12中的文件名，这个0是字符串结尾符，C语言中的'\0'
+;====== get FAT Entry
+; :param: AX FAT表项号
+; :ret:   AX FAT表项值
+Func_GetFATEntry:
+    ; 保护寄存器，调用该函数时时 ES:BX 用于前一个函数，其中数据还有用
+    push    es
+    push    bx
+    ; 设定当前函数中的ES为0
+    push    ax
+    mov     ax,     00
+    mov     es,     ax
+    pop     ax
 
+    mov     byte    [Odd],  0
+    mov     bx,     3
+    mul     bx                  ; AX = 3 * 表项号
+    mov     bx,     2
+    div     bx                  ; AX = 表项号 × 3 / 2, 余数在DX中
+    cmp     dx,     0
+    jz      Label_Even          ; 偶数保留Odd原始的0
+    mov     byte    [Odd],  1   ; 奇数置为1
+Label_Even:
+    xor     dx,     dx
+    mov     bx,     [BPB_BytesPerSec]
+    div     bx                  ; AX = 表项号 × 1.5 / 每扇区字节数 = FAT表项所在扇区在FAT1中的偏移
+    ; 读取两个扇区。两个是为了考虑表项跨扇区的可能性，第二个扇区最多读1个字节
+    push    dx
+    mov     bx,     8000h
+    add     ax,     SectorNumOfFAT1Start    ; FAT表项首地址所在扇区
+    mov     cl,     2
+    call    Func_ReadOneSector
+
+    pop     dx                  ; DX = 表项号 × 1.5 % 每扇区字节数 = 表项在所在扇区中的偏移
+    add     bx,     dx          ; 在读取到的两个扇区中找到FAT表项首地址偏移
+    mov     ax,     [es:bx]     ; 从表项首地址读两个字节入AX
+    cmp     byte    [Odd],  1
+    jnz     Label_Even_2
+    ; 奇数的额外处理
+    shr     ax,     4
+Label_Even_2:
+    and     ax,     0fffh       ; 表项是低三位
+    pop     bx
+    pop     es
+    ret
+
+;====== temp variables
+RootDirSizeForLoop  dw  RootDirSectors
+SectorNo            dw  0
+Odd                 db  0
 ;====== display message data
+LoaderFileName:     db  "LOADER  BIN", 0 ; loader.bin在fat12中的文件名，这个0是字符串结尾符，C语言中的'\0'
+NoLoaderMessage:    db  "ERROR:No LOADER Found"
 StartBootMessage:   db  "Hello World"
 
 ;=======	fill zero until whole sector
